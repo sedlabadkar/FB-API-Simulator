@@ -1,0 +1,262 @@
+import akka.actor._
+import akka.actor.ActorSystem
+import akka.io.IO
+import spray.can.Http
+import spray.httpx._
+import spray.http.{HttpMethods, HttpRequest, HttpResponse, Uri, HttpEntity, ContentTypes}
+import akka.pattern.ask
+import scala.concurrent.Future
+import spray.json._
+import DefaultJsonProtocol._
+import scala.collection.mutable.ArrayBuffer
+import scala.collection._
+import scala.collection.convert.decorateAsScala._
+import java.util.concurrent.ConcurrentHashMap
+import scala.util.Random
+import spray.client.pipelining.{ Get, sendReceive }
+import spray.client.pipelining.{ Post, sendReceive }
+import spray.json.DefaultJsonProtocol
+import spray.httpx.SprayJsonSupport._
+import spray.client.pipelining._
+import scala.concurrent.Future
+import scala.util.{ Success, Failure }
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext
+import akka.util.Timeout
+import scala.language.postfixOps
+
+//Shared case classes
+case class userProfileIN (id:Int, name:String, gender:Int, birthday:String, email:String)
+case class postIN(userID:Int, content:String, isPersonalMessage:Boolean, privacyLevel:Int)
+case class postOUT(content:String, timeStamp:Long, numLikes:Int, numComments:Int)
+case class profileOUT(name:String, gender:Int, email:String, birthday:String, isUser:Boolean)
+case class pageOUT(userProf:profileOUT, postCount:Int, postList:List[postOUT])
+case class friendListIN (id:Int, a:List[Int])
+
+
+//Case Classes local to this file
+case class register(clientStartID:Int, numClients:Int, name:String)
+
+object MyJsonProtocol extends DefaultJsonProtocol {
+  implicit val PersonFormat = jsonFormat5(userProfileIN)
+  implicit val postFormat = jsonFormat4(postIN)
+  implicit val postOutFormat = jsonFormat4(postOUT)
+  implicit val profileOutFormat = jsonFormat5(profileOUT)
+  implicit val pageOutFormat = jsonFormat3(pageOUT)
+  implicit val intlistFormat = jsonFormat2(friendListIN)
+}
+
+import MyJsonProtocol._
+import spray.httpx.SprayJsonSupport._
+import spray.util._
+
+trait WebClient {
+    def get(url: String): Future[String]
+  }
+
+class sprayWebClient(implicit system:ActorSystem ) extends WebClient{
+
+ val pipeline: HttpRequest => Future[HttpResponse] = sendReceive
+ def get(url: String): Future[String] = {
+      val futureResponse = pipeline(Get(url))
+      futureResponse.map(_.entity.asString)
+    }
+}
+
+class clientActor extends Actor {
+  implicit val timeout = Timeout(50000 seconds)
+  var numUsers:Int = 0
+  var friendListMap = new ConcurrentHashMap[Int, List[Int]]
+  var content:String = "Ash nazg durbatulûk, ash nazg gimbatul, ash nazg thrakatulûk, agh burzum-ishi krimpatul."
+
+  def getPage(userID:Int){
+    println ("Get User Page ID = " + userID)
+    val pipeline: HttpRequest => Future[pageOUT] = (
+                      sendReceive
+                      ~> unmarshal[pageOUT]
+        )
+    val futureResponse:Future[pageOUT] = pipeline(HttpRequest(HttpMethods.GET, "http://127.0.0.1:8080/page/" + userID))
+    futureResponse onComplete {
+          case Success(response:pageOUT) => {
+            if (response.postCount == -1)
+            {
+              println ("User doesnt exist")
+            }
+            else
+            {
+              println ("Got User Page Username = " + response.userProf.name)
+              println ("Got User Page Post Count = " + response.postCount)
+              if (response.postCount > 0)
+                response.postList.foreach(x => println("Got User Page Post = " + x.content))
+            }
+          
+          }
+          case Failure (error) => ("Request Timed out")
+        }
+  }
+  
+  def getProfile (userID:Int){
+    println ("Get User Profile ID = " + userID)
+    val pipeline: HttpRequest => Future[profileOUT] = (
+                      sendReceive
+                      ~> unmarshal[profileOUT]
+        )
+    val futureResponse:Future[profileOUT] = pipeline(HttpRequest(HttpMethods.GET, "http://127.0.0.1:8080/profile/" + userID))
+    futureResponse onComplete {
+          case Success(response:profileOUT) => {
+            if ((response.name).equals("Not Found"))
+            {
+              println ("User doesnt exist")
+            }
+            else
+            {
+              println ("Got User Profile Username = " + response.name)
+            }
+          
+          }
+          case Failure (error) => ("Request Timed out")
+        }
+  }
+
+  def getFriendList(userID:Int)
+  {
+    val pipeline: HttpRequest => Future[friendListIN] = (
+                      sendReceive
+                      ~> unmarshal[friendListIN]
+        )
+    val futureResponse:Future[friendListIN] = pipeline(HttpRequest(HttpMethods.GET, "http://127.0.0.1:8080/friendlist/" + userID))
+    futureResponse onComplete {
+          case Success(response:friendListIN) => {
+            if (response.a.size  == 0)
+            {
+              //println ("Not Found")
+            }
+            else
+            {
+              println ("Friend list for " + userID + " received") 
+              response.a.foreach(x=> print (" " + x))
+            }
+          }
+          case Failure (error) => ("Request Timed out")
+        }
+  }
+
+  def getPost(userID:Int, postID:Int) {
+    val pipeline: HttpRequest => Future[postOUT] = (
+                      sendReceive
+                      ~> unmarshal[postOUT]
+        )
+    val futureResponse:Future[postOUT] = pipeline(HttpRequest(HttpMethods.GET, "http://127.0.0.1:8080/post/" + postID))
+    futureResponse onComplete {
+          case Success(response:postOUT) => {
+            if (response.timeStamp  == -1)
+            {
+              //println ("Not Found")
+            }
+            else
+            {
+              println ("Post " + response.content + " Timestamp = " + response.timeStamp)
+            }
+          }
+          case Failure (error) => ("Request Timed out")
+        }
+
+  }
+
+  def makePost(userID:Int, content:String, isPersonalMessage:Boolean, privacyLevel:Int) {
+    val pipeline: HttpRequest => Future[String] = (
+                      sendReceive
+                      ~> unmarshal[String]
+        )
+    var result = HttpEntity(ContentTypes.`application/json`, (postIN(userID, content, isPersonalMessage, privacyLevel).toJson).prettyPrint)
+    val futureResponse:Future[String] = pipeline(HttpRequest(HttpMethods.POST, "http://127.0.0.1:8080/post", Nil,result))
+    futureResponse onComplete {
+          case Success(response:String) => {
+          //Unless Error is generated, it is considered successful
+          //println (response)
+          }
+          case Failure (error) => println  ("Request Timed out")
+        }
+  }
+
+  def registerToServer (id:Int, name:String) {
+    val pipeline: HttpRequest => Future[String] = (
+                      sendReceive
+                      ~> unmarshal[String]
+        )
+    var result = HttpEntity(ContentTypes.`application/json`, ((userProfileIN (id, name, 1, "02/29/1900", "foo.bar@foobar.com")).toJson).prettyPrint)
+    val futureResponse:Future[String] = pipeline(HttpRequest(HttpMethods.POST, "http://127.0.0.1:8080/register", Nil,result))
+    futureResponse onComplete {
+          case Success(response:String) => {
+          //Unless Error is generated, it is considered successful
+          }
+          case Failure (error) => println ("Request Timed out")
+        }
+  }
+
+
+  def receive = {
+    case register(clientStartID:Int, numClients:Int,  name:String) =>{
+      numUsers = numClients
+      for (i<- 0 to numClients)
+      {
+        registerToServer(clientStartID + i, name+i)
+      }
+      //To have some legible output first up before the scheduler madness starts
+      for (i <- 0  to 10)
+      {
+        makePost(1000, content, false, 1)
+      }
+      getProfile(1000)
+      getPage(1000)
+      getFriendList(1000)
+
+    }
+    case "start" => {
+      println ("\nStarting request timers")
+       for (i <- 0 to numUsers)
+        {
+        
+        if (i < 7500) //Heavy Users generate a lot of content. Read Less - Write More
+        {
+          context.system.scheduler.schedule(20 seconds, 1 seconds)(makePost(i, content, Random.nextBoolean(), Random.nextInt(3-1)))
+          context.system.scheduler.schedule(20 seconds, 5 seconds)(getPost(i, Random.nextInt(40)))
+          context.system.scheduler.schedule(20 seconds, 120 seconds)(getProfile(Random.nextInt(10000 - 0)))
+          context.system.scheduler.schedule(20 seconds, 120 seconds)(getPage(Random.nextInt(10000 - 0)))
+        }
+        else if (i >= 7500 && i < 9000) //Moderate Users. Read and Write approximately the same amount
+        {
+          context.system.scheduler.schedule(25 seconds, 2 seconds)(makePost(i, content, Random.nextBoolean(), Random.nextInt(3-1)))
+          context.system.scheduler.schedule(30 seconds, 2 seconds)(getPost(i, Random.nextInt(100)))
+          context.system.scheduler.schedule(20 seconds, 90 seconds)(getProfile(Random.nextInt(10000 - 0)))
+          context.system.scheduler.schedule(20 seconds, 90 seconds)(getPage(Random.nextInt(10000 - 0)))
+        }
+        else if (i >= 9000)// Read, read and read. Write rarely
+        {
+          context.system.scheduler.schedule(30 seconds, 3 seconds)(makePost(i, content, Random.nextBoolean(), Random.nextInt(3-1)))
+          context.system.scheduler.schedule(60 seconds, 1 seconds)(getPost(i, Random.nextInt(100)))
+          context.system.scheduler.schedule(20 seconds, 60 seconds)(getProfile(Random.nextInt(10000 - 0)))
+          context.system.scheduler.schedule(60 seconds, 60 seconds)(getPage(Random.nextInt(10000 - 0)))
+          }
+      }
+    }
+    case "makeFirstPost" => {
+      println ("\nMake the first post for all users")
+      for (i <- 0  to numUsers)
+      {
+        makePost(i, content, false, 1)
+      }
+    }
+  }
+}
+
+object client extends App {
+  val clientActorSys = ActorSystem("ClientActorSys")
+  //Number of Clients
+  val TotalNumClients = 10000
+  val client = clientActorSys.actorOf(Props[clientActor], "Sauron")
+  client ! register(0, TotalNumClients,  "Sauron")
+  clientActorSys.scheduler.scheduleOnce(30 seconds)(client ! "makeFirstPost")
+  clientActorSys.scheduler.scheduleOnce(40 seconds)(client ! "start")
+} 
